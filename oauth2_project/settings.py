@@ -116,7 +116,34 @@ AUTH_PASSWORD_VALIDATORS = [
     },
 ]
 
-
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "formatters": {
+        "standard": {
+            "format": "[{asctime}] {levelname} {name} {message} | event={event}",
+            "style": "{",
+        },
+        "verbose": {
+            "format": "[{asctime}] {levelname} {name} {message} | event={event} module={module} func={funcName} line={lineno}",
+            "style": "{",
+        },
+    },
+    "handlers": {
+        "console": {
+            "class": "logging.StreamHandler",
+            "formatter": "verbose",
+        },
+    },
+    "loggers": {
+        "OAuth2": {
+            "handlers": ["console"],
+            "level": "DEBUG",
+            "propagate": False,
+        },
+    },
+}
+# "level": "INFO", en producción se recomienda cambiar a INFO o WARNING para reducir el ruido en los logs
 # Internationalization
 # https://docs.djangoproject.com/en/6.0/topics/i18n/
 

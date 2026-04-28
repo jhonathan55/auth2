@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <title>Código de verificación</title>
+</head>
+<body style="font-family: Arial, sans-serif; background-color: #f7f7f7; padding: 24px;">
+  <table width="100%" cellspacing="0" cellpadding="0" style="max-width: 600px; margin: 0 auto; background: #ffffff; border-radius: 8px; padding: 32px;">
+    <tr>
+      <td>
+        <h2 style="margin-top: 0; color: #222;">Verificación de acceso</h2>
+        <p style="color: #444; font-size: 15px;">
+          Hola, se ha solicitado un código de verificación para tu acceso.
+        </p>
+        <p style="color: #444; font-size: 15px;">
+          Tu código MFA es:
+        </p>
+
+        <div style="font-size: 28px; font-weight: bold; letter-spacing: 6px; color: #111; margin: 24px 0;">
+          {{ code }}
+        </div>
+
+        <p style="color: #444; font-size: 14px;">
+          Este código expira en {{ expiration_minutes }} minutos.
+        </p>
+
+        <p style="color: #444; font-size: 14px;">
+          Si no solicitaste este acceso, ignora este mensaje y considera cambiar tu contraseña.
+        </p>
+
+        <hr style="margin: 24px 0; border: none; border-top: 1px solid #ddd;">
+
+        <p style="font-size: 12px; color: #777;">
+          Este es un mensaje automático. No respondas a este correo.
+        </p>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>

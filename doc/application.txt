@@ -1,0 +1,579 @@
+# CAPA APPLICATION
+
+## Documentacion tecnica en formato Markdown
+
+---
+
+# 1. Proposito
+
+La capa `application` es el coordinador central del sistema de autenticacion. Su responsabilidad es **orquestar los casos de uso** del negocio: recibe datos de entrada tipados mediante DTOs, aplica reglas de negocio invocando exclusivamente contratos del dominio, y devuelve respuestas estructuradas. No conoce Django, HTTP, bases de datos ni servicios de correo de forma directa.
+
+Esta capa actua como el Application Service Layer del patron DDD y como el punto de entrada natural desde cualquier interfaz del sistema hacia el nucleo logico.
+
+---
+
+# 2. Alcance dentro de la arquitectura
+
+## 2.1 Posicion arquitectonica
+
+```text
+Interfaces/API  -->  Application  -->  Domain Ports  -->  Infrastructure
+                          |
+                        DTOs
+```
+
+La capa application no depende de la infraestructura directamente. Depende de abstracciones del dominio, que la infraestructura implementa. Esto garantiza que un cambio de base de datos, proveedor de correo o libreria JWT no afecte los casos de uso.
+
+## 2.2 Responsabilidades en este proyecto
+
+- Implementar los tres casos de uso de autenticacion: registro, login y verificacion MFA.
+- Transportar datos entre capas mediante DTOs inmutables.
+- Elevar excepciones del dominio para representar fallos funcionales.
+- Retornar `AuthResponseDTO` como contrato de respuesta unico hacia las interfaces.
+
+---
+
+# 3. Estructura del modulo
+
+```text
+OAuth2/application/
+├── dto/
+│   ├── login_dto.py
+│   ├── register_dto.py
+│   ├── verify_mfa_dto.py
+│   └── auth_response_dto.py
+└── use_cases/
+    ├── register_user.py
+    ├── login_user.py
+    └── verify_mfa.py
+```
+
+---
+
+# 4. Data Transfer Objects (DTOs)
+
+Los DTOs son `dataclass(frozen=True)` que representan entradas y salidas de los casos de uso. Son inmutables por diseno para evitar mutaciones accidentales entre capas.
+
+## 4.1 LoginDTO
+
+Transporta las credenciales de inicio de sesion.
+
+| Campo | Tipo | Descripcion |
+|---|---|---|
+| `email` | `str` | Identificador de login |
+| `password` | `str` | Contrasena en texto plano |
+
+## 4.2 RegisterDTO
+
+Transporta los datos de un nuevo usuario.
+
+| Campo | Tipo | Descripcion |
+|---|---|---|
+| `nombres` | `str` | Nombres del usuario |
+| `apellidos` | `str` | Apellidos del usuario |
+| `email` | `str` | Email unico de registro |
+| `password` | `str` | Contrasena en texto plano |
+
+## 4.3 VerifyMFADTO
+
+Transporta el codigo MFA ingresado por el usuario junto al proposito del desafio.
+
+| Campo | Tipo | Descripcion |
+|---|---|---|
+| `email` | `str` | Email del usuario que verifica |
+| `code` | `str` | Codigo MFA recibido |
+| `purpose` | `str` | Proposito del desafio, default `LOGIN` |
+
+## 4.4 AuthResponseDTO y AuthUserDTO
+
+`AuthResponseDTO` es la unica estructura de respuesta de los casos de uso hacia las interfaces.
+
+| Campo | Tipo | Descripcion |
+|---|---|---|
+| `message` | `str` | Mensaje descriptivo del resultado |
+| `mfa_required` | `bool` | Indica si se requiere verificacion de segundo factor |
+| `access_token` | `str | None` | JWT de acceso, presente si la autenticacion es completa |
+| `refresh_token` | `str | None` | JWT de refresco |
+| `email` | `str | None` | Email del usuario, presente cuando se espera MFA |
+| `user` | `AuthUserDTO | None` | Datos basicos del usuario autenticado |
+
+`AuthUserDTO` encapsula la representacion minima del usuario en respuestas exitosas.
+
+| Campo | Tipo | Descripcion |
+|---|---|---|
+| `id` | `int` | Identificador del usuario |
+| `email` | `str` | Email |
+| `nombres` | `str` | Nombres |
+| `apellidos` | `str` | Apellidos |
+| `roles` | `list[str]` | Lista de roles asignados |
+
+---
+
+# 5. Casos de uso
+
+## 5.1 RegisterUserUseCase
+
+**Dependencias inyectadas:**
+
+- `UserRepository`
+- `PasswordHasher`
+
+**Flujo:**
+
+1. Busca si el email ya existe via `UserRepository.find_by_email`.
+2. Si existe, lanza `ValueError`.
+3. Construye `UserEntity` con la contrasena hasheada y valores iniciales seguros.
+4. Persiste la entidad via `UserRepository.save`.
+5. Retorna la entidad persistida.
+
+**Invariantes que aplica:**
+
+- Un email no puede registrarse dos veces.
+- La contrasena nunca se almacena en claro.
+- Un usuario nuevo inicia con `is_active=True`, `is_staff=False`, `is_email_verified=False`, `mfa_enabled=False`.
+
+## 5.2 LoginUserUseCase
+
+**Dependencias inyectadas:**
+
+- `UserRepository`
+- `PasswordHasher`
+- `MFARepository`
+- `NotificationService`
+- `TokenProvider`
+
+**Flujo — sin MFA:**
+
+1. Busca el usuario por email.
+2. Verifica contrasena con `PasswordHasher.verify`.
+3. Verifica que el usuario este activo.
+4. Actualiza `last_login_at`.
+5. Genera `access_token` y `refresh_token`.
+6. Retorna `AuthResponseDTO` con tokens y datos del usuario.
+
+**Flujo — con MFA habilitado:**
+
+1. Pasos 1 a 4 identicos.
+2. Envia el codigo MFA via `NotificationService.send_mfa_code`.
+3. Retorna `AuthResponseDTO` con `mfa_required=True` y el email del usuario.
+
+**Invariantes que aplica:**
+
+- Si el usuario no existe o la contrasena es incorrecta, el mensaje de error es identico para evitar enumeracion de usuarios.
+- Un usuario inactivo no puede continuar aunque la contrasena sea correcta.
+
+## 5.3 VerifyMFAUseCase
+
+**Dependencias inyectadas:**
+
+- `UserRepository`
+- `MFARepository`
+- `PasswordHasher`
+- `TokenProvider`
+
+**Flujo:**
+
+1. Busca el usuario por email.
+2. Busca el desafio activo por `user_id` y `purpose` via `MFARepository`.
+3. Valida que el desafio no este consumido.
+4. Valida que el desafio no haya expirado.
+5. Valida que no se hayan superado los intentos maximos.
+6. Incrementa `challenge.attempts`.
+7. Verifica el codigo contra `code_hash` con `PasswordHasher.verify`.
+8. Si el codigo es incorrecto, persiste el intento y lanza excepcion.
+9. Si el codigo es correcto, marca `consumed_at`, genera tokens y retorna `AuthResponseDTO`.
+
+**Invariantes que aplica:**
+
+- Un desafio consumido no puede reutilizarse.
+- Un desafio expirado es rechazado aunque el codigo sea valido.
+- Cada intento fallido se registra en `challenge.attempts`.
+- El codigo se valida como hash, nunca en texto plano.
+
+---
+
+# 6. Excepciones del dominio usadas por application
+
+| Excepcion | Caso de uso | Condicion |
+|---|---|---|
+| `InvalidCredentialsException` | Login | Usuario no existe o contrasena incorrecta |
+| `InactiveUserException` | Login | `user.is_active == False` |
+| `UserNotFoundException` | VerifyMFA | Usuario no existe al verificar |
+| `MFAChallengeNotFoundException` | VerifyMFA | No existe desafio activo |
+| `InvalidOrExpiredMFACodeException` | VerifyMFA | Desafio consumido, expirado o codigo invalido |
+| `MFAAttemptsExceededException` | VerifyMFA | `attempts >= max_attempts` |
+| `ValueError` | Register | Email ya registrado |
+
+---
+
+# 7. Arquitectura estructural de alto nivel
+
+Muestra la posicion de `application` dentro del sistema completo y la direccion de las dependencias entre capas.
+
+```mermaid
+flowchart LR
+    CLI[Cliente HTTP]
+    API[Interfaces / API REST]
+    APP[Application\nUse Cases + DTOs]
+    DOM[Domain\nEntities + Ports + Exceptions]
+    INF[Infrastructure\nAdapters]
+    DB[(Base de datos)]
+    MAIL[Servicio de correo]
+    JWT[Proveedor JWT]
+
+    CLI --> API
+    API --> APP
+    APP --> DOM
+    INF -.->|implementa| DOM
+    APP --> INF
+    INF --> DB
+    INF --> MAIL
+    INF --> JWT
+```
+
+Las flechas continuas representan dependencias de compilacion. La flecha punteada representa inversion de dependencias: la infraestructura implementa los puertos del dominio.
+
+---
+
+# 8. UML estructural de bajo nivel
+
+Muestra DTOs, casos de uso y sus dependencias concretas conocidas hacia la infraestructura.
+
+```mermaid
+classDiagram
+    class LoginDTO {
+        +str email
+        +str password
+    }
+
+    class RegisterDTO {
+        +str nombres
+        +str apellidos
+        +str email
+        +str password
+    }
+
+    class VerifyMFADTO {
+        +str email
+        +str code
+        +str purpose
+    }
+
+    class AuthUserDTO {
+        +int id
+        +str email
+        +str nombres
+        +str apellidos
+        +list~str~ roles
+    }
+
+    class AuthResponseDTO {
+        +str message
+        +bool mfa_required
+        +AuthUserDTO user
+        +str access_token
+        +str refresh_token
+        +str email
+    }
+
+    class RegisterUserUseCase {
+        -UserRepository user_repository
+        -PasswordHasher password_hasher
+        +execute(nombres, apellidos, email, password) User
+    }
+
+    class LoginUserUseCase {
+        -UserRepository user_repository
+        -PasswordHasher password_hasher
+        -MFARepository mfa_repository
+        -NotificationService notification_service
+        -TokenProvider token_provider
+        +execute(dto: LoginDTO) AuthResponseDTO
+    }
+
+    class VerifyMFAUseCase {
+        -UserRepository user_repository
+        -MFARepository mfa_repository
+        -PasswordHasher password_hasher
+        -TokenProvider token_provider
+        +execute(dto: VerifyMFADTO) AuthResponseDTO
+    }
+
+    class UserRepository { <<interface>> }
+    class MFARepository { <<interface>> }
+    class PasswordHasher { <<interface>> }
+    class TokenProvider { <<interface>> }
+    class NotificationService { <<interface>> }
+
+    RegisterUserUseCase --> UserRepository
+    RegisterUserUseCase --> PasswordHasher
+    LoginUserUseCase --> UserRepository
+    LoginUserUseCase --> PasswordHasher
+    LoginUserUseCase --> MFARepository
+    LoginUserUseCase --> NotificationService
+    LoginUserUseCase --> TokenProvider
+    VerifyMFAUseCase --> UserRepository
+    VerifyMFAUseCase --> MFARepository
+    VerifyMFAUseCase --> PasswordHasher
+    VerifyMFAUseCase --> TokenProvider
+
+    LoginUserUseCase ..> LoginDTO
+    LoginUserUseCase ..> AuthResponseDTO
+    VerifyMFAUseCase ..> VerifyMFADTO
+    VerifyMFAUseCase ..> AuthResponseDTO
+    AuthResponseDTO --> AuthUserDTO
+```
+
+---
+
+# 9. Vista logica de alto nivel
+
+Flujo general de los tres casos de uso desde la perspectiva del negocio sin entrar en detalles de implementacion.
+
+```mermaid
+sequenceDiagram
+    actor Cliente
+    participant API as API REST
+    participant APP as Application
+    participant DOM as Domain Ports
+    participant INF as Infrastructure
+
+    rect rgb(220, 240, 255)
+        Note over Cliente,INF: Registro
+        Cliente->>API: POST /register
+        API->>APP: RegisterUserUseCase.execute(...)
+        APP->>DOM: Valida existencia + hashea contrasena
+        APP->>INF: Persiste nuevo usuario
+        INF-->>APP: User guardado
+        APP-->>API: User entity
+    end
+
+    rect rgb(220, 255, 220)
+        Note over Cliente,INF: Login
+        Cliente->>API: POST /login
+        API->>APP: LoginUserUseCase.execute(LoginDTO)
+        APP->>DOM: Verifica credenciales y estado
+        APP->>INF: Actualiza last_login + emite tokens o MFA
+        INF-->>APP: Resultado
+        APP-->>API: AuthResponseDTO
+    end
+
+    rect rgb(255, 245, 200)
+        Note over Cliente,INF: Verificacion MFA
+        Cliente->>API: POST /verify-mfa
+        API->>APP: VerifyMFAUseCase.execute(VerifyMFADTO)
+        APP->>DOM: Valida desafio activo + codigo
+        APP->>INF: Actualiza challenge + emite tokens
+        INF-->>APP: Resultado
+        APP-->>API: AuthResponseDTO con tokens
+    end
+```
+
+---
+
+# 10. Vista logica de bajo nivel
+
+## 10.1 Secuencia detallada de registro
+
+```mermaid
+sequenceDiagram
+    actor Cliente
+    participant RegUC as RegisterUserUseCase
+    participant UserRepo as UserRepository
+    participant Hasher as PasswordHasher
+
+    Cliente->>RegUC: execute(nombres, apellidos, email, password)
+    RegUC->>UserRepo: find_by_email(email)
+    UserRepo-->>RegUC: User | None
+
+    alt Email ya existe
+        RegUC-->>Cliente: ValueError("El correo ya está registrado")
+    else Email libre
+        RegUC->>Hasher: hash(password)
+        Hasher-->>RegUC: password_hash
+        RegUC->>UserRepo: save(UserEntity con defaults seguros)
+        UserRepo-->>RegUC: UserEntity persistida
+        RegUC-->>Cliente: UserEntity
+    end
+```
+
+## 10.2 Secuencia detallada de login
+
+```mermaid
+sequenceDiagram
+    actor Cliente
+    participant LoginUC as LoginUserUseCase
+    participant UserRepo as UserRepository
+    participant Hasher as PasswordHasher
+    participant Notifier as NotificationService
+    participant Tokens as TokenProvider
+
+    Cliente->>LoginUC: execute(LoginDTO)
+    LoginUC->>UserRepo: find_by_email(dto.email)
+    UserRepo-->>LoginUC: User | None
+
+    alt Usuario no encontrado
+        LoginUC-->>Cliente: InvalidCredentialsException
+    else Usuario encontrado
+        LoginUC->>Hasher: verify(dto.password, user.password_hash)
+        Hasher-->>LoginUC: bool
+
+        alt Contrasena invalida
+            LoginUC-->>Cliente: InvalidCredentialsException
+        else Contrasena valida
+            alt Usuario inactivo
+                LoginUC-->>Cliente: InactiveUserException
+            else Usuario activo
+                LoginUC->>UserRepo: update_last_login(user.id)
+
+                alt mfa_enabled = True
+                    LoginUC->>Notifier: send_mfa_code(user.email, code)
+                    LoginUC-->>Cliente: AuthResponseDTO(mfa_required=true, email)
+                else mfa_enabled = False
+                    LoginUC->>Tokens: generate_access_token(user.id, email, roles)
+                    LoginUC->>Tokens: generate_refresh_token(user.id)
+                    LoginUC-->>Cliente: AuthResponseDTO(access_token, refresh_token, user)
+                end
+            end
+        end
+    end
+```
+
+## 10.3 Secuencia detallada de verificacion MFA
+
+```mermaid
+sequenceDiagram
+    actor Cliente
+    participant VerifyUC as VerifyMFAUseCase
+    participant UserRepo as UserRepository
+    participant MFARepo as MFARepository
+    participant Hasher as PasswordHasher
+    participant Tokens as TokenProvider
+
+    Cliente->>VerifyUC: execute(VerifyMFADTO)
+    VerifyUC->>UserRepo: find_by_email(dto.email)
+    UserRepo-->>VerifyUC: User | None
+
+    alt Usuario no existe
+        VerifyUC-->>Cliente: UserNotFoundException
+    else Usuario existe
+        VerifyUC->>MFARepo: find_active_by_user_and_purpose(user.id, dto.purpose)
+        MFARepo-->>VerifyUC: MFAChallenge | None
+
+        alt No existe desafio activo
+            VerifyUC-->>Cliente: MFAChallengeNotFoundException
+        else Desafio encontrado
+            alt consumed_at no es None
+                VerifyUC-->>Cliente: InvalidOrExpiredMFACodeException
+            else expires_at < now
+                VerifyUC-->>Cliente: InvalidOrExpiredMFACodeException
+            else attempts >= max_attempts
+                VerifyUC-->>Cliente: MFAAttemptsExceededException
+            else Desafio vigente
+                VerifyUC->>Hasher: verify(dto.code, challenge.code_hash)
+                Hasher-->>VerifyUC: bool
+
+                alt Codigo invalido
+                    VerifyUC->>MFARepo: update(attempts + 1)
+                    VerifyUC-->>Cliente: InvalidOrExpiredMFACodeException
+                else Codigo valido
+                    VerifyUC->>MFARepo: update(consumed_at = now, attempts)
+                    VerifyUC->>Tokens: generate_access_token(user.id, email, roles)
+                    VerifyUC->>Tokens: generate_refresh_token(user.id)
+                    VerifyUC-->>Cliente: AuthResponseDTO(tokens, user)
+                end
+            end
+        end
+    end
+```
+
+---
+
+# 11. Inyeccion de dependencias
+
+Los casos de uso reciben todas sus dependencias por constructor. El contenedor de infraestructura (`Container`) resuelve las implementaciones concretas.
+
+```text
+Container
+├── register_user_use_case()
+│   ├── DjangoUserRepository  ->  UserRepository
+│   └── DjangoPasswordHasher  ->  PasswordHasher
+│
+├── login_user_use_case()
+│   ├── DjangoUserRepository  ->  UserRepository
+│   ├── DjangoPasswordHasher  ->  PasswordHasher
+│   ├── DjangoMFARepository   ->  MFARepository
+│   ├── EmailNotificationService -> NotificationService
+│   └── JwtTokenProvider      ->  TokenProvider
+│
+└── verify_mfa_use_case()
+    ├── DjangoUserRepository  ->  UserRepository
+    ├── DjangoMFARepository   ->  MFARepository
+    ├── DjangoPasswordHasher  ->  PasswordHasher
+    └── JwtTokenProvider      ->  TokenProvider
+```
+
+Esto garantiza que los casos de uso son completamente testeables con mocks sin necesidad de levantar Django ni base de datos.
+
+---
+
+# 12. Seguridad aplicada (OWASP)
+
+## 12.1 Controles presentes
+
+| Control | Implementacion | Riesgo mitigado |
+|---|---|---|
+| Mensaje de error identico para usuario/password invalidos | `InvalidCredentialsException` con mismo mensaje | User enumeration (OWASP A07) |
+| Verificacion de cuenta activa tras validar credenciales | `InactiveUserException` separada | Acceso no autorizado |
+| Hashing de contrasenas | `PasswordHasher.hash/verify` | Exposicion de credenciales (OWASP A02) |
+| MFA de segundo factor | `send_mfa_code` + `VerifyMFAUseCase` | Credential stuffing / brute force (OWASP A07) |
+| Limite de intentos MFA | `max_attempts` en `MFAChallenge` | Brute force sobre codigo temporal |
+| Expiracion de desafio MFA | `expires_at` verificado en use case | Replay attacks sobre codigos caducados |
+| Marcado de consumo en desafio | `consumed_at` | Reutilizacion de codigo MFA |
+| Tokens con expiracion corta | `exp` en JWT, 1h access / 7d refresh | Secuestro de sesion prolongado |
+| No logear contrasenas ni codigos | Logs solo incluyen email, user_id, eventos | Data leakage (OWASP A09) |
+
+---
+
+# 13. Observaciones de diseno del estado actual
+
+## 13.1 LoginUserUseCase no persiste el desafio MFA
+
+El `LoginUserUseCase` envia un codigo fijo por correo sin crear ni guardar un `MFAChallenge` en base de datos. El `VerifyMFAUseCase` espera encontrar ese desafio mediante `MFARepository`. El flujo MFA no esta operativamente completo todavia.
+
+## 13.2 RegisterUserUseCase recibe parametros sueltos, no un DTO
+
+A diferencia de `LoginUserUseCase` y `VerifyMFAUseCase`, `RegisterUserUseCase.execute` acepta cuatro parametros posicionales en lugar de recibir un `RegisterDTO`. Esto crea inconsistencia en el contrato de los casos de uso.
+
+## 13.3 LoginResult es un dataclass no utilizado
+
+`LoginResult` esta definido en `login_user.py` pero no se usa en ningun lugar del flujo actual. El caso de uso retorna `AuthResponseDTO` directamente.
+
+---
+
+# 14. Recomendaciones de evolucion
+
+## 14.1 Completar el flujo MFA en login
+
+El `LoginUserUseCase` deberia:
+
+1. Generar un codigo aleatorio criptograficamente seguro.
+2. Hashearlo con `PasswordHasher.hash`.
+3. Construir un `MFAChallenge` con `uuid4`, `purpose=LOGIN`, `channel=EMAIL`, y duracion de 5 minutos.
+4. Persistirlo via `MFARepository.save`.
+5. Enviar el codigo plano por `NotificationService.send_mfa_code`.
+
+## 14.2 Unificar el contrato de entrada de RegisterUserUseCase
+
+Adoptar `RegisterDTO` como parametro del metodo `execute` para mantener coherencia con los demas casos de uso.
+
+## 14.3 Eliminar LoginResult
+
+Al no estar en uso, `LoginResult` debe eliminarse para reducir ruido y confusion en el modulo.
+
+---
+
+# 15. Resumen ejecutivo
+
+La capa `application` tiene una separacion de responsabilidades correcta y es testeable mediante inyeccion de dependencias. Los flujos de registro, login sin MFA y verificacion MFA estan bien implementados funcionalmente, con manejo explicito de todas las ramas de error del dominio. Las oportunidades de mejora mas relevantes son: completar la implementacion del login con MFA para que persista el desafio antes de enviarlo, uniformizar el contrato de entrada de `RegisterUserUseCase` y eliminar el artefacto no utilizado `LoginResult`.
+

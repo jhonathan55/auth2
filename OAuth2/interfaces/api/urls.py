@@ -1,5 +1,6 @@
 from django.urls import path
-from .views import RegisterView, LoginView, VerifyMFAView
+
+from OAuth2.interfaces.api.views import RegisterView, LoginView, VerifyMFAView
 
 urlpatterns = [
     path("register/", RegisterView.as_view(), name="register"),

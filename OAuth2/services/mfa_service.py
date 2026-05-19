@@ -1,4 +1,4 @@
-import random
+import secrets
 from datetime import timedelta
 
 from django.contrib.auth.hashers import make_password, check_password
@@ -8,7 +8,7 @@ from OAuth2.models import MFAChallenge
 
 
 def generate_6_digit_code() -> str:
-    return f"{random.randint(0, 999999):06d}"
+    return f"{secrets.randbelow(1000000):06d}"
 
 
 def create_mfa_challenge(user, purpose="LOGIN"):

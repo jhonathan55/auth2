@@ -41,3 +41,17 @@ class LoginSerializer(serializers.Serializer):
 class VerifyMFASerializer(serializers.Serializer):
     email = serializers.EmailField()
     code = serializers.CharField(min_length=6, max_length=6)
+
+
+class PasswordRecoveryRequestSerializer(serializers.Serializer):
+    email = serializers.EmailField()
+
+
+class VerifyPasswordRecoveryCodeSerializer(serializers.Serializer):
+    email = serializers.EmailField()
+    code = serializers.CharField(trim_whitespace=True)
+
+
+class ChangePasswordWithRecoverySerializer(serializers.Serializer):
+    email = serializers.EmailField()
+    new_password = serializers.CharField(write_only=True, min_length=8)

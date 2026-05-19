@@ -75,6 +75,7 @@ class MFAChallenge(models.Model):
     channel = models.CharField(max_length=20, choices=CHANNEL_CHOICES, default="EMAIL")
     purpose = models.CharField(max_length=30, choices=PURPOSE_CHOICES, default="LOGIN")
     expires_at = models.DateTimeField(default=default_mfa_expiration)
+    verified_at = models.DateTimeField(null=True, blank=True)
     consumed_at = models.DateTimeField(null=True, blank=True)
     attempts = models.PositiveIntegerField(default=0)
     max_attempts = models.PositiveIntegerField(default=5)
